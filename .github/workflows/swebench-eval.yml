@@ -1,16 +1,17 @@
-name: SWE-Bench Evaluation Workflow
-
+name: SWE-bench Pro Evaluation
 on:
   push:
     branches:
       - main
   workflow_dispatch:
-
-permissions:
-  contents: write
+    inputs:
+      task_id:
+        description: 'Task ID to run'
+        required: true
+        default: 'internetarchive__openlibrary-c4eebe6677acc4629cb541a98d5e91311444f5d4'
 
 jobs:
-  swe-bench-eval:
+  evaluate:
     runs-on: ubuntu-latest
     container:
       image: manojva/openlibrary-python312:latest
@@ -20,23 +21,16 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Agent Dependencies
+      - name: Setup Repository
         run: |
-          pip install requests pyyaml
+          chmod +x setup_repository.sh
+          ./setup_repository.sh
 
-      - name: Setup Target Repository
-        run: |
-          rm -rf /testbed
-          git clone https://github.com/internetarchive/openlibrary.git /testbed
-          cd /testbed
-          git config --global --add safe.directory /testbed
-          git reset --hard 84cc4ed5697b83a849e9106a09bfed501169cc20
-
-      - name: Run AI Agent (Claude)
+      - name: Run AI Agent
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python run_claude.py
+          python run_agent.py
 
       - name: Extract Metrics
         if: always()
@@ -54,5 +48,4 @@ jobs:
             pre_verification.log
             post_verification.log
             changes.patch
-            prompts.log
             prompts.md
