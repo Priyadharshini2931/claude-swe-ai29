@@ -7,23 +7,27 @@ import requests
 import yaml
 import re
 
-# Configuration
+# ================= CONFIGURATION =================
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
 MODELS = [
-    "claude-3-haiku-20240307",     # Haiku (Fast) - Try this first since it worked
-    "claude-3-5-sonnet-20240620",  # Sonnet 3.5
-    "claude-3-sonnet-20240229",    # Sonnet 3
-    "claude-3-opus-20240229",      # Opus
+    "claude-3-haiku-20240307",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-sonnet-20240229",
+    "claude-3-opus-20240229",
 ]
+
 TASK_FILE = "task.yaml"
 ARTIFACTS_DIR = "."
 
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+
+# ================= UTILITIES =================
 def log(message):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
 def run_command(command, log_file=None, check=False, cwd=None):
-    """Run a shell command and optionally log output to a file."""
     log(f"Running command: {command} (cwd={cwd or '.'})")
     try:
         result = subprocess.run(
@@ -33,9 +37,9 @@ def run_command(command, log_file=None, check=False, cwd=None):
             text=True,
             cwd=cwd
         )
-        
+
         output = result.stdout + result.stderr
-        
+
         if log_file:
             with open(log_file, "a") as f:
                 f.write(f"\nCommand: {command}\n")
@@ -43,264 +47,182 @@ def run_command(command, log_file=None, check=False, cwd=None):
                 f.write("--- OUTPUT ---\n")
                 f.write(output)
                 f.write("\n--------------\n")
-        
+
         if check and result.returncode != 0:
-            log(f"Command failed with RC {result.returncode}: {command}")
-            log(output)
-            raise subprocess.CalledProcessError(result.returncode, command, output)
+            raise subprocess.CalledProcessError(
+                result.returncode, command, output
+            )
 
         return result.returncode, result.stdout, result.stderr
+
     except Exception as e:
-        log(f"Error executing command: {e}")
+        log(f"Command execution error: {e}")
         if check:
-            raise e
+            raise
         return -1, "", str(e)
 
-def call_anthropic(prompt, task_context, logs):
+# ================= ANTHROPIC CALL =================
+def call_anthropic(task_context, logs):
     if not API_KEY:
-        log("Error: ANTHROPIC_API_KEY not set.")
+        log("ANTHROPIC_API_KEY not set.")
         return None
-        
-    cleaned_key = API_KEY.strip()
-    url = "https://api.anthropic.com/v1/messages"
-    
-    # Try models one by one
-    for model_name in MODELS:
-        log(f"Attempting API call with model: {model_name}")
-        
-        headers = {
-            "x-api-key": cleaned_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        
-        technical_requirements = task_context.get('requirements', '')
-        interface_spec = task_context.get('interface', '')
-        
-        system_prompt = f"""You are an expert Python developer tasked with fixing a bug in the OpenLibrary codebase.
 
-Task Context:
-{task_context['title']}
-{task_context['description']}
+    headers = {
+        "x-api-key": API_KEY.strip(),
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
 
-Technical Requirements:
-{technical_requirements}
+    system_prompt = f"""
+You are an expert Python developer tasked with fixing a bug.
 
-Interface Specification:
-{interface_spec}
+Task:
+{task_context.get('title')}
+{task_context.get('description')}
 
-The initial test run failed with the logs provided below. Your goal is to analyze the failure and provide a Git patch to fix the issue.
+Requirements:
+{task_context.get('requirements', '')}
 
-Current Working Directory: /testbed
+Interface:
+{task_context.get('interface', '')}
 
-Output Format:
-Return ONLY the Git patch content inside a code block, like this:
-```diff
-diff --git a/path/to/file.py b/path/to/file.py
-index ...
---- a/path/to/file.py
-+++ b/path/to/file.py
-@@ ... @@
-- existing line
-+ new line
-```
-Ensure the paths in the diff are relative to the repository root (e.g., openlibrary/core/imports.py).
+Return ONLY a git diff in a ```diff``` code block.
+Paths must be repo-relative.
 """
-    
-        user_message = f"Here are the failure logs from the pre-verification step:\n\n{logs[-8000:]}"
-    
-        data = {
-            "model": model_name,
+
+    user_text = f"""
+Here are the failing logs:
+
+{logs[-8000:]}
+"""
+
+    for model in MODELS:
+        log(f"Trying model: {model}")
+
+        payload = {
+            "model": model,
             "max_tokens": 4096,
+            "system": system_prompt,
             "messages": [
-                {"role": "user", "content": user_message}
-            ],
-            "system": system_prompt
-        }
-    
-        try:
-            response = requests.post(url, headers=headers, json=data)
-            response.raise_for_status()
-            result = response.json()
-            
-            log(f"Success with model: {model_name}")
-            
-            # Log prompt and response (JSONL)
-            with open(os.path.join(ARTIFACTS_DIR, "prompts.log"), "a") as f:
-                entry = {
-                    "timestamp": time.time(),
-                    "prompt": user_message,
-                    "response": result
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text}
+                    ],
                 }
-                f.write(json.dumps(entry) + "\n")
-                
-            # Log to prompts.md
-            with open(os.path.join(ARTIFACTS_DIR, "prompts.md"), "a") as f:
-                f.write(f"## Prompt at {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write(f"### Model: {model_name}\n\n")
-                f.write("### Request\n")
-                f.write("```\n" + user_message[:1000] + "...(truncated)...\n```\n\n")
-                f.write("### Response\n")
-                text_response = result['content'][0]['text']
-                f.write("```\n" + text_response + "\n```\n\n")
-                
-            return result['content'][0]['text']
-            
-        except requests.exceptions.RequestException as e:
-            log(f"Model {model_name} failed: {e}")
-            if e.response is not None:
-                 log(f"Response Status: {e.response.status_code}")
-                 log(f"Response Body: {e.response.text}")
-            continue
-            
-    log("All models failed.")
+            ],
+        }
+
+        try:
+            resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload)
+            if resp.status_code != 200:
+                log(f"Model {model} failed ({resp.status_code})")
+                log(resp.text)
+                continue
+
+            data = resp.json()
+
+            text = data["content"][0]["text"]
+
+            with open("prompts.log", "a") as f:
+                f.write(json.dumps({
+                    "time": time.time(),
+                    "model": model,
+                    "response": text
+                }) + "\n")
+
+            return text
+
+        except Exception as e:
+            log(f"Model {model} exception: {e}")
+
     return None
 
+# ================= PATCH EXTRACTION =================
 def extract_patch(response_text):
-    """Extract the diff content from the response."""
-    # Look for diff block
     match = re.search(r"```diff\n(.*?)```", response_text, re.DOTALL)
     if match:
         return match.group(1)
-    
-    # Fallback: generic code block containing diff
-    match = re.search(r"```\n(.*?)```", response_text, re.DOTALL)
-    if match:
-        content = match.group(1)
-        if "diff --git" in content or "--- a/" in content:
-            return content
-            
-    # Fallback: Just the text if it looks like a diff
-    if "diff --git" in response_text and "index" in response_text:
+
+    if "diff --git" in response_text:
         return response_text
-        
+
     return None
 
+# ================= MAIN WORKFLOW =================
 def main():
     log("=== STARTING AGENT WORKFLOW ===")
-    
-    # Check Environment
-    if not API_KEY:
-        log("CRITICAL ERROR: ANTHROPIC_API_KEY is not set.")
-        sys.exit(1)
-    else:
-        log(f"API Key present (starts with {API_KEY[:4]}...)")
 
-    # Load Task Config
+    if not API_KEY:
+        log("CRITICAL: ANTHROPIC_API_KEY not set")
+        sys.exit(1)
+
     try:
         with open(TASK_FILE, "r") as f:
             task_config = yaml.safe_load(f)
-        log(f"Successfully loaded {TASK_FILE}")
-    except FileNotFoundError:
-        log(f"CRITICAL ERROR: Config file {TASK_FILE} not found.")
-        sys.exit(1)
-    except yaml.YAMLError as e:
-        log(f"CRITICAL ERROR: Invalid YAML in {TASK_FILE}: {e}")
+    except Exception as e:
+        log(f"Failed to load task.yaml: {e}")
         sys.exit(1)
 
-    verification_cmd = task_config['tests']['test_command']
-    setup_cmds = task_config.get('setup', {}).get('commands', '')
-
-    # Setup
     target_dir = "/testbed"
-    
-    if os.path.exists(target_dir):
-        log(f"Found target directory: {target_dir}")
-        run_command("git config --global --add safe.directory /testbed")
-        code, out, err = run_command("git status", cwd=target_dir)
-        log(f"Git status: OK")
-    else:
-        log(f"ERROR: Target directory {target_dir} does NOT exist.")
+    verification_cmd = task_config["tests"]["test_command"]
+
+    if not os.path.exists(target_dir):
+        log("Target directory missing")
         sys.exit(1)
 
-    if setup_cmds and os.path.exists(target_dir):
-        log(f"Running Setup Commands in {target_dir}...")
-        for cmd in setup_cmds.splitlines():
-            if cmd.strip() and not cmd.strip().startswith('cd '):
-                ret, out, err = run_command(cmd, cwd=target_dir)
-                if ret != 0:
-                    log(f"Setup command warning: {cmd}")
-    
-    # Pre-Verification
-    log("Starting Pre-Verification...")
-    
-    pre_log_file = os.path.join(ARTIFACTS_DIR, "pre_verification.log")
-    if os.path.exists(pre_log_file):
-        os.remove(pre_log_file)
-    
-    ret_code, stdout, stderr = run_command(verification_cmd, pre_log_file)
-    
-    log(f"Pre-verification completed (RC={ret_code})")
-    if stdout:
-        log(f"STDOUT preview: {stdout[:300]}")
-    if stderr:
-        log(f"STDERR preview: {stderr[:300]}")
-    
-    # Agent Execution
-    log("Starting Agent Execution...")
-    combined_logs = stdout + "\n" + stderr
-    
-    # Read the full log file for better context
-    if os.path.exists(pre_log_file):
-        with open(pre_log_file, 'r') as f:
-            combined_logs = f.read()
-    
-    agent_response = call_anthropic(
-        prompt="Fix the bug based on the logs.",
-        task_context=task_config,
-        logs=combined_logs
-    )
-    
-    if not agent_response:
-        log("Agent failed to provide a response.")
+    run_command("git config --global --add safe.directory /testbed")
+
+    # ===== PRE-VERIFICATION =====
+    pre_log = "pre_verification.log"
+    if os.path.exists(pre_log):
+        os.remove(pre_log)
+
+    ret, out, err = run_command(verification_cmd, pre_log, cwd=target_dir)
+
+    logs = ""
+    if os.path.exists(pre_log):
+        with open(pre_log) as f:
+            logs = f.read()
+    else:
+        logs = out + err
+
+    # ===== AGENT =====
+    response = call_anthropic(task_config, logs)
+
+    if not response:
+        log("Agent produced no response")
         sys.exit(1)
 
-    # Save Agent Log
-    with open(os.path.join(ARTIFACTS_DIR, "agent.log"), "w") as f:
-        log_entry = {
-            "action": "generate_patch",
-            "observation": "Analyzed logs and generated patch",
-            "response_length": len(agent_response)
-        }
-        f.write(json.dumps(log_entry) + "\n")
-
-    # Apply Patch
-    patch_content = extract_patch(agent_response)
-    if patch_content:
-        patch_file = os.path.join(ARTIFACTS_DIR, "changes.patch")
-        with open(patch_file, "w") as f:
-            f.write(patch_content)
-        
-        log(f"Patch saved to {patch_file}. Applying...")
-        
-        abs_patch_path = os.path.abspath(patch_file)
-        
-        apply_ret, _, apply_err = run_command(f"git apply {abs_patch_path}", cwd=target_dir)
-        
-        if apply_ret != 0:
-            log(f"git apply failed, trying patch command...")
-            apply_ret, _, apply_err = run_command(f"patch -p1 < {abs_patch_path}", cwd=target_dir)
-            
-            if apply_ret != 0:
-                log("Patch application failed, but continuing to post-verification...")
-    else:
-        log("No valid patch found in agent response.")
+    patch = extract_patch(response)
+    if not patch:
+        log("No patch found in response")
         with open("agent_response_raw.txt", "w") as f:
-             f.write(agent_response)
+            f.write(response)
+        sys.exit(1)
 
-    # Post-Verification
-    log("Starting Post-Verification...")
-    post_log_file = os.path.join(ARTIFACTS_DIR, "post_verification.log")
-    if os.path.exists(post_log_file):
-        os.remove(post_log_file)
-    
-    ret_code, _, _ = run_command(verification_cmd, post_log_file)
-    
-    if ret_code == 0:
-        log("Post-verification passed! Fix successful.")
+    patch_file = "changes.patch"
+    with open(patch_file, "w") as f:
+        f.write(patch)
+
+    # ===== APPLY PATCH =====
+    ret, _, _ = run_command(f"git apply {patch_file}", cwd=target_dir)
+    if ret != 0:
+        log("git apply failed, trying patch")
+        run_command(f"patch -p1 < {patch_file}", cwd=target_dir)
+
+    # ===== POST-VERIFICATION =====
+    post_log = "post_verification.log"
+    if os.path.exists(post_log):
+        os.remove(post_log)
+
+    ret, _, _ = run_command(verification_cmd, post_log, cwd=target_dir)
+
+    if ret == 0:
+        log("✅ POST-VERIFICATION PASSED")
     else:
-        log(f"Post-verification failed (RC={ret_code}).")
-    
+        log("❌ POST-VERIFICATION FAILED")
+
     log("=== WORKFLOW COMPLETE ===")
 
 if __name__ == "__main__":
