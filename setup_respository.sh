@@ -1,4 +1,4 @@
-cat > setup_repository.sh << 'EOF'
+cat << 'EOF' > setup_repository.sh
 #!/bin/bash
 set -e
 set -o pipefail
@@ -21,10 +21,9 @@ git clean -fd
 if git cat-file -e "$TEST_COMMIT:$TEST_FILE"; then
     git checkout "$TEST_COMMIT" -- "$TEST_FILE"
 else
-    echo "ERROR: $TEST_FILE does not exist in commit $TEST_COMMIT"
+    echo "ERROR: File not found in commit"
     exit 1
 fi
 
 echo "Setup complete."
 EOF
-v
