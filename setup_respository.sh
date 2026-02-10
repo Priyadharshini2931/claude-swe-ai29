@@ -1,4 +1,4 @@
-cat << 'EOF' > setup_repository.sh
+
 #!/bin/bash
 set -e
 set -o pipefail
